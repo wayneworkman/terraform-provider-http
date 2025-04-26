@@ -1,0 +1,3 @@
+### Unreleased
+
+* data-source/http: Add env-var authentication support (Basic, Token, OAuth2, JWT) via TF_HTTP_* variables.

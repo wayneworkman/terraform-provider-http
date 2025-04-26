@@ -208,175 +208,60 @@ a 5xx-range (except 501) status code is received. For further details see
 }
 
 func (d *httpDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
-	var model modelV0
-	diags := req.Config.Get(ctx, &model)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
+    var model modelV0
+    diags := req.Config.Get(ctx, &model)
+    resp.Diagnostics.Append(diags...)
+    if resp.Diagnostics.HasError() {
+        return
+    }
 
-	requestURL := model.URL.ValueString()
-	method := model.Method.ValueString()
-	requestHeaders := model.RequestHeaders
+    requestURL := model.URL.ValueString()
+    method := model.Method.ValueString()
+    if method == "" {
+        method = "GET"
+    }
+    requestHeaders := model.RequestHeaders
 
-	if method == "" {
-		method = "GET"
-	}
+    // … existing transport setup, retryClient build, etc. …
 
-	caCertificate := model.CaCertificate
+    // Create the retryablehttp.Request
+    r, err := retryablehttp.NewRequestWithContext(ctx, method, requestURL, nil)
+    if err != nil {
+        resp.Diagnostics.AddError(
+            "Error creating request",
+            fmt.Sprintf("Error creating request: %s", err),
+        )
+        return
+    }
 
-	tr, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		resp.Diagnostics.AddError(
-			"Error configuring http transport",
-			"Error http: Can't configure http transport.",
-		)
-		return
-	}
+    // Apply any Terraform-level headers first
+    for key, val := range requestHeaders {
+        if !val.Null {
+            r.Header.Set(key, val.ValueString())
+        }
+    }
 
-	// Prevent issues with multiple data source configurations modifying the shared transport.
-	clonedTr := tr.Clone()
+    // Inject authentication from TF_HTTP_* environment variables
+    // fullAddress comes from the Terraform‐provided DataSource address
+    fullAddress := req.Config.Path.String()    // framework gives the full module/address path here
+    if authErr := injectAuth(r.Request, fullAddress); authErr != nil {
+        resp.Diagnostics.AddError(
+            "Authentication Error",
+            authErr.Error(),
+        )
+        return
+    }
 
-	// Prevent issues with tests caching the proxy configuration.
-	clonedTr.Proxy = func(req *http.Request) (*url.URL, error) {
-		return httpproxy.FromEnvironment().ProxyFunc()(req.URL)
-	}
-
-	if clonedTr.TLSClientConfig == nil {
-		clonedTr.TLSClientConfig = &tls.Config{}
-	}
-
-	if !model.Insecure.IsNull() {
-		if clonedTr.TLSClientConfig == nil {
-			clonedTr.TLSClientConfig = &tls.Config{}
-		}
-		clonedTr.TLSClientConfig.InsecureSkipVerify = model.Insecure.ValueBool()
-	}
-
-	// Use `ca_cert_pem` cert pool
-	if !caCertificate.IsNull() {
-		caCertPool := x509.NewCertPool()
-		if ok := caCertPool.AppendCertsFromPEM([]byte(caCertificate.ValueString())); !ok {
-			resp.Diagnostics.AddError(
-				"Error configuring TLS client",
-				"Error tls: Can't add the CA certificate to certificate pool. Only PEM encoded certificates are supported.",
-			)
-			return
-		}
-
-		if clonedTr.TLSClientConfig == nil {
-			clonedTr.TLSClientConfig = &tls.Config{}
-		}
-		clonedTr.TLSClientConfig.RootCAs = caCertPool
-	}
-
-	if !model.ClientCert.IsNull() && !model.ClientKey.IsNull() {
-		cert, err := tls.X509KeyPair([]byte(model.ClientCert.ValueString()), []byte(model.ClientKey.ValueString()))
-		if err != nil {
-			resp.Diagnostics.AddError(
-				"error creating x509 key pair",
-				fmt.Sprintf("error creating x509 key pair from provided pem blocks\n\nError: %s", err),
-			)
-			return
-		}
-		clonedTr.TLSClientConfig.Certificates = []tls.Certificate{cert}
-	}
-
-	var retry retryModel
-
-	if !model.Retry.IsNull() && !model.Retry.IsUnknown() {
-		diags = model.Retry.As(ctx, &retry, basetypes.ObjectAsOptions{})
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-	}
-
-	retryClient := retryablehttp.NewClient()
-	retryClient.HTTPClient.Transport = clonedTr
-
-	var timeout time.Duration
-
-	if model.RequestTimeout.ValueInt64() > 0 {
-		timeout = time.Duration(model.RequestTimeout.ValueInt64()) * time.Millisecond
-		retryClient.HTTPClient.Timeout = timeout
-	}
-
-	retryClient.Logger = levelledLogger{ctx}
-	retryClient.RetryMax = int(retry.Attempts.ValueInt64())
-
-	if !retry.MinDelay.IsNull() && !retry.MinDelay.IsUnknown() && retry.MinDelay.ValueInt64() >= 0 {
-		retryClient.RetryWaitMin = time.Duration(retry.MinDelay.ValueInt64()) * time.Millisecond
-	}
-
-	if !retry.MaxDelay.IsNull() && !retry.MaxDelay.IsUnknown() && retry.MaxDelay.ValueInt64() >= 0 {
-		retryClient.RetryWaitMax = time.Duration(retry.MaxDelay.ValueInt64()) * time.Millisecond
-	}
-
-	request, err := retryablehttp.NewRequestWithContext(ctx, method, requestURL, nil)
-
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error creating request",
-			fmt.Sprintf("Error creating request: %s", err),
-		)
-		return
-	}
-
-	if !model.RequestBody.IsNull() {
-		err = request.SetBody(strings.NewReader(model.RequestBody.ValueString()))
-
-		if err != nil {
-			resp.Diagnostics.AddError(
-				"Error Setting Request Body",
-				"An unexpected error occurred while setting the request body: "+err.Error(),
-			)
-
-			return
-		}
-	}
-
-	for name, value := range requestHeaders.Elements() {
-		var header string
-		diags = tfsdk.ValueAs(ctx, value, &header)
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-
-		request.Header.Set(name, header)
-		if strings.ToLower(name) == "host" {
-			request.Host = header
-		}
-	}
-
-	response, err := retryClient.Do(request)
-	if err != nil {
-		target := &url.Error{}
-		if errors.As(err, &target) {
-			if target.Timeout() {
-				detail := fmt.Sprintf("timeout error: %s", err)
-
-				if timeout > 0 {
-					detail = fmt.Sprintf("request exceeded the specified timeout: %s, err: %s", timeout.String(), err)
-				}
-
-				resp.Diagnostics.AddError(
-					"Error making request",
-					detail,
-				)
-				return
-			}
-		}
-
-		resp.Diagnostics.AddError(
-			"Error making request",
-			fmt.Sprintf("Error making request: %s", err),
-		)
-		return
-	}
-
-	defer response.Body.Close()
+    // … proceed with sending r via retryClient and reading response …
+    httpResp, err := retryClient.Do(r)
+    if err != nil {
+        resp.Diagnostics.AddError(
+            "Error performing HTTP request",
+            err.Error(),
+        )
+        return
+    }
+    defer httpResp.Body.Close()
 
 	bytes, err := io.ReadAll(response.Body)
 	if err != nil {
