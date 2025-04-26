@@ -5,14 +5,10 @@ package provider
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -220,7 +216,6 @@ func (d *httpDataSource) Read(ctx context.Context, req datasource.ReadRequest, r
     if method == "" {
         method = "GET"
     }
-    requestHeaders := model.RequestHeaders
 
     // … existing transport setup, retryClient build, etc. …
 
@@ -235,15 +230,18 @@ func (d *httpDataSource) Read(ctx context.Context, req datasource.ReadRequest, r
     }
 
     // Apply any Terraform-level headers first
-    for key, val := range requestHeaders {
-        if !val.Null {
-            r.Header.Set(key, val.ValueString())
-        }
+    var headerMap map[string]string
+    diags = model.RequestHeaders.ElementsAs(ctx, &headerMap, false)
+    resp.Diagnostics.Append(diags...)
+    if resp.Diagnostics.HasError() {
+        return
+    }
+    for k, v := range headerMap {
+        r.Header.Set(k, v)
     }
 
     // Inject authentication from TF_HTTP_* environment variables
-    // fullAddress comes from the Terraform‐provided DataSource address
-    fullAddress := req.Config.Path.String()    // framework gives the full module/address path here
+    fullAddress := req.Config.Raw.Path.String()
     if authErr := injectAuth(r.Request, fullAddress); authErr != nil {
         resp.Diagnostics.AddError(
             "Authentication Error",
@@ -263,46 +261,46 @@ func (d *httpDataSource) Read(ctx context.Context, req datasource.ReadRequest, r
     }
     defer httpResp.Body.Close()
 
-	bytes, err := io.ReadAll(response.Body)
-	if err != nil {
-		resp.Diagnostics.AddError(
-			"Error reading response body",
-			fmt.Sprintf("Error reading response body: %s", err),
-		)
-		return
-	}
+    bytes, err := io.ReadAll(response.Body)
+    if err != nil {
+        resp.Diagnostics.AddError(
+            "Error reading response body",
+            fmt.Sprintf("Error reading response body: %s", err),
+        )
+        return
+    }
 
-	if !utf8.Valid(bytes) {
-		resp.Diagnostics.AddWarning(
-			"Response body is not recognized as UTF-8",
-			"Terraform may not properly handle the response_body if the contents are binary.",
-		)
-	}
+    if !utf8.Valid(bytes) {
+        resp.Diagnostics.AddWarning(
+            "Response body is not recognized as UTF-8",
+            "Terraform may not properly handle the response_body if the contents are binary.",
+        )
+    }
 
-	responseBody := string(bytes)
-	responseBodyBase64Std := base64.StdEncoding.EncodeToString(bytes)
+    responseBody := string(bytes)
+    responseBodyBase64Std := base64.StdEncoding.EncodeToString(bytes)
 
-	responseHeaders := make(map[string]string)
-	for k, v := range response.Header {
-		// Concatenate according to RFC9110 https://www.rfc-editor.org/rfc/rfc9110.html#section-5.2
-		responseHeaders[k] = strings.Join(v, ", ")
-	}
+    responseHeaders := make(map[string]string)
+    for k, v := range response.Header {
+        // Concatenate according to RFC9110 https://www.rfc-editor.org/rfc/rfc9110.html#section-5.2
+        responseHeaders[k] = strings.Join(v, ", ")
+    }
 
-	respHeadersState, diags := types.MapValueFrom(ctx, types.StringType, responseHeaders)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
+    respHeadersState, diags := types.MapValueFrom(ctx, types.StringType, responseHeaders)
+    resp.Diagnostics.Append(diags...)
+    if resp.Diagnostics.HasError() {
+        return
+    }
 
-	model.ID = types.StringValue(requestURL)
-	model.ResponseHeaders = respHeadersState
-	model.ResponseBody = types.StringValue(responseBody)
-	model.Body = types.StringValue(responseBody)
-	model.ResponseBodyBase64 = types.StringValue(responseBodyBase64Std)
-	model.StatusCode = types.Int64Value(int64(response.StatusCode))
+    model.ID = types.StringValue(requestURL)
+    model.ResponseHeaders = respHeadersState
+    model.ResponseBody = types.StringValue(responseBody)
+    model.Body = types.StringValue(responseBody)
+    model.ResponseBodyBase64 = types.StringValue(responseBodyBase64Std)
+    model.StatusCode = types.Int64Value(int64(response.StatusCode))
 
-	diags = resp.State.Set(ctx, model)
-	resp.Diagnostics.Append(diags...)
+    diags = resp.State.Set(ctx, model)
+    resp.Diagnostics.Append(diags...)
 }
 
 type modelV0 struct {

@@ -4,17 +4,14 @@
 package provider
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"time"
 )
 
 type authMethod int
