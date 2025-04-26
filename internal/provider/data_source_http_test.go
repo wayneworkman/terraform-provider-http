@@ -1050,3 +1050,30 @@ func checkMinDelay(timeOfFirstRequest, timeOfSecondRequest *int64, minDelay int)
 		return nil
 	}
 }
+
+func TestNormalizeAddress(t *testing.T) {
+    cases := map[string]string{
+        "data.http.latest":                           "LATEST",
+        "module.a.module.b.data.http.config.v2":      "MODULE_A_MODULE_B_CONFIG_V2",
+        "data.http.my-dat@source!":                   "MY_DAT_SOURCE_",
+    }
+    for in, want := range cases {
+        got := normalizeAddress(in)
+        if got != want {
+            t.Errorf("normalizeAddress(%q) = %q; want %q", in, got, want)
+        }
+    }
+}
+
+func TestInjectBasic(t *testing.T) {
+    os.Setenv("TF_HTTP_USR_FOO", "u")
+    os.Setenv("TF_HTTP_PW_FOO", "p")
+    req, _ := http.NewRequest("GET", "http://example.com", nil)
+    if err := injectAuth(req, "data.http.foo"); err != nil {
+        t.Fatalf("injectAuth error: %v", err)
+    }
+    want := "Basic " + base64.StdEncoding.EncodeToString([]byte("u:p"))
+    if got := req.Header.Get("Authorization"); got != want {
+        t.Errorf("Authorization header = %q; want %q", got, want)
+    }
+}
